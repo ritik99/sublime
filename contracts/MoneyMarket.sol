@@ -6,51 +6,50 @@ import "./PriceOracleInterface.sol";
 import "./SafeToken.sol";
 
 /**
-  * @title The Compound MoneyMarket Contract
-  * @author Compound
-  * @notice The Compound MoneyMarket Contract in the core contract governing
-  *         all accounts in Compound.
+  * @author Ritik
+  * @notice Version 1.0 - Sublime
   */
-contract MoneyMarket is Exponential, SafeToken {
+contract Lending is Exponential, SafeToken {
+    uint constant wadPrecision = 10 ** 18;
+    uint constant oneTenthWadPrecision = 10 ** 17;
 
-    uint constant initialInterestIndex = 10 ** 18;
-    uint constant defaultOriginationFee = 0; // default is zero bps
+    uint constant blocksPerYear = 2321592;
+    uint constant stakeLockPeriod = 44646; // Number of blocks in one week
 
-    uint constant minimumCollateralRatioMantissa = 11 * (10 ** 17); // 1.1
-    uint constant maximumLiquidationDiscountMantissa = (10 ** 17); // 0.1
+    uint constant initialInterestIndex = 10 ** 18; // USE ???
+    uint constant defaultTransactionFee = 0; // default is zero bps
 
-    /**
-      * @notice `MoneyMarket` is the core Compound MoneyMarket contract
-      */
+    uint constant minimumCollateralRatio = 10.5 * (10 ** 17);
+
+    uint constant maximumLiquidationDiscount = (10 ** 17); // 0.1
+
     constructor() public {
         admin = msg.sender;
-        collateralRatio = Exp({mantissa: 2 * mantissaOne});
-        originationFee = Exp({mantissa: defaultOriginationFee});
-        liquidationDiscount = Exp({mantissa: 0});
-        // oracle must be configured via _setOracle
+        collateralRatio = Exp({mantissa: 2 * mantissaOne});  //Exp({mantissa: 2 * mantissaOne});
+        transactionFee = Exp({mantissa: defaultTransactionFee}); //Exp({mantissa: defaultOriginationFee});
+        liquidationDiscount = Exp({mantissa: 0}); // Initially discount is set to Exp({mantissa: 0});
     }
 
     /**
-      * @notice Do not pay directly into MoneyMarket, please use `supply`.
+      * Catch invalid deposits to contract and revert them
       */
     function() payable public {
         revert();
     }
 
     /**
-      * @dev pending Administrator for this contract.
+      * Pending admin
       */
     address public pendingAdmin;
 
     /**
-      * @dev Administrator for this contract. Initially set in constructor, but can
-      *      be changed by the admin itself.
+      * Defaul admin is the deployer. Can be changed by admin.
       */
     address public admin;
 
     /**
-      * @dev Account allowed to set oracle prices for this contract. Initially set
-      *      in constructor, but can be changed by the admin.
+      * Account allowed to set oracle prices for this contract. Can be 
+      * changed by admin.
       */
     address public oracle;
 
@@ -68,15 +67,28 @@ contract MoneyMarket is Exponential, SafeToken {
     }
 
     /**
-      * @dev 2-level map: customerAddress -> assetAddress -> balance for supplies
+      *  Maps customerAddress to assetAddress to balance for supplies
       */
     mapping(address => mapping(address => Balance)) public supplyBalances;
 
 
     /**
-      * @dev 2-level map: customerAddress -> assetAddress -> balance for borrows
+      * Maps customerAddress to assetAddress to balance for borrow
       */
     mapping(address => mapping(address => Balance)) public borrowBalances;
+
+    /*
+     * Maps customerAddress to assetAddress to stake for the assetAddress reserve pool
+     */
+
+    mapping(address => mapping(address => Balance)) public stakingBalances;
+
+    /*
+     * Users deposit assets for reserve pools in the global reserve pool
+     */
+
+    mapping(address => mapping(address => Balance)) public globalReservePoolBalances;
+
 
 
     /**
@@ -95,76 +107,99 @@ contract MoneyMarket is Exponential, SafeToken {
       */
     struct Market {
         bool isSupported;
-        uint blockNumber;
+        uint lastUpdatedBlockNumber;
         InterestRateModel interestRateModel;
 
-        uint totalSupply;
-        uint supplyRateMantissa;
-        uint supplyIndex;
+        uint borrowInterestRateExp;
+        uint supplyInterestRateExp;
+        uint reservePremiumRateExp;
+        uint utilisationRatio;
 
-        uint totalBorrows;
-        uint borrowRateMantissa;
+        uint totalSupply;
+        uint totalBorrow;
+        uint totalReserve;
+
+        uint supplyIndex;
         uint borrowIndex;
+        uint reserveIndex;
     }
 
     /**
-      * @dev map: assetAddress -> Market
+      *  Mapping each assetAddress to Market
       */
     mapping(address => Market) public markets;
 
     /**
-      * @dev list: collateralMarkets
+      * Look-up table for assets and users. Delete later after testing
       */
-    address[] public collateralMarkets;
+
+    address[] public assetsLUT;
+    address[] public collateralAssetsLUT;
+    address[] public userAddressLUT;
 
     /**
-      * @dev The collateral ratio that borrows must maintain (e.g. 2 implies 2:1). This
-      *      is initially set in the constructor, but can be changed by the admin.
+      * NOT REQUIRED
       */
     Exp public collateralRatio;
 
     /**
-      * @dev originationFee for new borrows.
-      *
+      * NOT REQUIRED
       */
     Exp public originationFee;
 
     /**
-      * @dev liquidationDiscount for collateral when liquidating borrows
+      * NOT REQUIRED
       *
       */
     Exp public liquidationDiscount;
 
     /**
-      * @dev flag for whether or not contract is paused
-      *
+      * Bool for contract paused or not
       */
     bool public paused;
 
 
     /**
-      * @dev emitted when a supply is received
-      *      Note: newBalance - amount - startingBalance = interest accumulated since last change
+      * Emit event when user supplies. newBalance - amount - startingBalance = interest accumulated since last change
       */
     event SupplyReceived(address account, address asset, uint amount, uint startingBalance, uint newBalance);
 
     /**
-      * @dev emitted when a supply is withdrawn
-      *      Note: startingBalance - amount - startingBalance = interest accumulated since last change
+      * Emit event when supply withdrawn. startingBalance - amount - startingBalance = interest accumulated since last change
       */
     event SupplyWithdrawn(address account, address asset, uint amount, uint startingBalance, uint newBalance);
 
     /**
-      * @dev emitted when a new borrow is taken
-      *      Note: newBalance - borrowAmountWithFee - startingBalance = interest accumulated since last change
+      * Emit event when user borrows. newBalance - borrowAmountWithFee - startingBalance = interest accumulated since last change
       */
     event BorrowTaken(address account, address asset, uint amount, uint startingBalance, uint borrowAmountWithFee, uint newBalance);
 
     /**
-      * @dev emitted when a borrow is repaid
-      *      Note: newBalance - amount - startingBalance = interest accumulated since last change
+      * Emit event when user repays. newBalance - startingBalance = interest accumulated since last change - amount
       */
     event BorrowRepaid(address account, address asset, uint amount, uint startingBalance, uint newBalance);
+
+    /*
+     * Emit event when user stakes in a reserve pool. newBalance - amount - startingBalance = premium earned - collateral liquidated
+     */
+    event StakedToReservePool(address account, address reservePool, uint amount, uint startingBalance, uint newBalance);
+
+
+    event UnstakeFromReservePool(address account, address reservePool, uint amount, uint startingBalance, uint newBalance);
+
+    event ReserveSupplied(address account, uint amount, uint startingBalance, uint newBalance);
+
+    event ReserveWithdrawn(address account, uint amount, uint startingBalance, uint newBalance);
+
+    /*
+     *  DID NOT INCLUDE borrowBalanceAccumulated, collateralBalanceAccumulated, liquidator
+     */
+    
+
+    event BorrowLiquidated(address targetAccount, address assetBorrow, 
+                            uint borrowBalanceBefore, uint amountRepaid, 
+                            uint borrowBalanceAfter, address assetCollateral, uint collateralBalanceBefore,
+                            uint collateralSeized, uint collateralBalanceAfter)
 
     /**
       * @dev emitted when a borrow is liquidated
@@ -233,7 +268,7 @@ contract MoneyMarket is Exponential, SafeToken {
       * @dev emitted when admin withdraws equity
       * Note that `equityAvailableBefore` indicates equity before `amount` was removed.
       */
-    event EquityWithdrawn(address asset, uint equityAvailableBefore, uint amount, address owner);
+    event EquityWithdrawnFromSupply(address asset, uint equityAvailableBefore, uint amount, address owner);
 
     /**
       * @dev emitted when a supported market is suspended by admin
@@ -269,13 +304,13 @@ contract MoneyMarket is Exponential, SafeToken {
       *      Note: this will not add the asset if it already exists.
       */
     function addCollateralMarket(address asset) internal {
-        for (uint i = 0; i < collateralMarkets.length; i++) {
-            if (collateralMarkets[i] == asset) {
+        for (uint i = 0; i < collateralAssetsLUT.length; i++) {
+            if (collateralAssetsLUT[i] == asset) {
                 return;
             }
         }
 
-        collateralMarkets.push(asset);
+        collateralAssetsLUT.push(asset);
     }
 
     /**
@@ -283,15 +318,15 @@ contract MoneyMarket is Exponential, SafeToken {
       * @dev you can then externally call `collateralMarkets(uint)` to pull each market address
       * @return the length of `collateralMarkets`
       */
-    function getCollateralMarketsLength() public view returns (uint) {
-        return collateralMarkets.length;
+    function getCollateralAssetsLUTLength() public view returns (uint) {
+        return collateralAssetsLUT.length;
     }
 
     /**
       * @dev Calculates a new supply index based on the prevailing interest rates applied over time
       *      This is defined as `we multiply the most recent supply index by (1 + blocks times rate)`
       */
-    function calculateInterestIndex(uint startingInterestIndex, uint interestRateMantissa, uint blockStart, uint blockEnd) pure internal returns (Error, uint) {
+    function calculateInterestIndex(uint startingInterestIndex, uint interestRateExp, uint blockStart, uint blockEnd) pure internal returns (Error, uint) {
 
         // Get the block delta
         (Error err0, uint blockDelta) = sub(blockEnd, blockStart);
@@ -301,7 +336,7 @@ contract MoneyMarket is Exponential, SafeToken {
 
         // Scale the interest rate times number of blocks
         // Note: Doing Exp construction inline to avoid `CompilerError: Stack too deep, try removing local variables.`
-        (Error err1, Exp memory blocksTimesRate) = mulScalar(Exp({mantissa: interestRateMantissa}), blockDelta);
+        (Error err1, Exp memory blocksTimesRate) = mulScalar(Exp({mantissa: interestRateExp}), blockDelta);
         if (err1 != Error.NO_ERROR) {
             return (err1, 0);
         }
@@ -423,9 +458,9 @@ contract MoneyMarket is Exponential, SafeToken {
         }
 
         PriceOracleInterface oracleInterface = PriceOracleInterface(oracle);
-        uint priceMantissa = oracleInterface.assetPrices(asset);
+        uint priceExp = oracleInterface.assetPrices(asset);
 
-        return (Error.NO_ERROR, Exp({mantissa: priceMantissa}));
+        return (Error.NO_ERROR, Exp({mantissa: priceExp}));
     }
 
     /**
@@ -595,7 +630,7 @@ contract MoneyMarket is Exponential, SafeToken {
         Balance storage supplyBalance = supplyBalances[account][asset];
 
         // Calculate the newSupplyIndex, needed to calculate user's supplyCurrent
-        (err, newSupplyIndex) = calculateInterestIndex(market.supplyIndex, market.supplyRateMantissa, market.blockNumber, getBlockNumber());
+        (err, newSupplyIndex) = calculateInterestIndex(market.supplyIndex, market.supplyRateExp, market.blockNumber, getBlockNumber());
         require(err == Error.NO_ERROR);
 
         // Use newSupplyIndex and stored principal to calculate the accumulated balance
@@ -621,7 +656,7 @@ contract MoneyMarket is Exponential, SafeToken {
         Balance storage borrowBalance = borrowBalances[account][asset];
 
         // Calculate the newBorrowIndex, needed to calculate user's borrowCurrent
-        (err, newBorrowIndex) = calculateInterestIndex(market.borrowIndex, market.borrowRateMantissa, market.blockNumber, getBlockNumber());
+        (err, newBorrowIndex) = calculateInterestIndex(market.borrowIndex, market.borrowRateExp, market.blockNumber, getBlockNumber());
         require(err == Error.NO_ERROR);
 
         // Use newBorrowIndex and stored principal to calculate the accumulated balance
@@ -629,6 +664,23 @@ contract MoneyMarket is Exponential, SafeToken {
         require(err == Error.NO_ERROR);
 
         return userBorrowCurrent;
+    }
+
+    function getReserveBalance(address account, address asset) view public returns (uint) {
+        Error err;
+        uint newReserveIndex;
+        uint userReserveCurrent;
+
+        Market storage market = markets[asset];
+        Balance storage reserveBalance = stakingBalancep[account][asset];
+
+        (err, newReserveIndex) = calculateInterestIndex(market.reserveIndex, market.reservePremiumRateExp, market.lastUpdatedBlockNumber, getBlockNumber());
+        require(err == Error.NO_ERROR);
+
+        (err, userReserveCurrent) = calculateBalance(reserveBalance.principal, reserveBalance.interestIndex, newReserveIndex);
+        require(err == Error.NO_ERROR);
+
+        return userReserveCurrent;
     }
 
 
@@ -714,16 +766,16 @@ contract MoneyMarket is Exponential, SafeToken {
       * @param liquidationDiscountMantissa rational liquidation discount, scaled by 1e18. The de-scaled value must be <= 0.1 and must be less than (descaled collateral ratio minus 1)
       * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
       */
-    function _setRiskParameters(uint collateralRatioMantissa, uint liquidationDiscountMantissa) public returns (uint) {
+    function _setRiskParameters(uint collateralRatioExp, uint liquidationDiscountExp) public returns (uint) {
         // Check caller = admin
         if (msg.sender != admin) {
             return fail(Error.UNAUTHORIZED, FailureInfo.SET_RISK_PARAMETERS_OWNER_CHECK);
         }
 
-        Exp memory newCollateralRatio = Exp({mantissa: collateralRatioMantissa});
-        Exp memory newLiquidationDiscount = Exp({mantissa: liquidationDiscountMantissa});
-        Exp memory minimumCollateralRatio = Exp({mantissa: minimumCollateralRatioMantissa});
-        Exp memory maximumLiquidationDiscount = Exp({mantissa: maximumLiquidationDiscountMantissa});
+        Exp memory newCollateralRatio = Exp({mantissa: collateralRatioExp});
+        Exp memory newLiquidationDiscount = Exp({mantissa: liquidationDiscountExp});
+        Exp memory minimumCollateralRatio = Exp({mantissa: minimumCollateralRatioExp});
+        Exp memory maximumLiquidationDiscount = Exp({mantissa: maximumLiquidationDiscountExp});
 
         Error err;
         Exp memory newLiquidationDiscountPlusOne;
@@ -767,18 +819,18 @@ contract MoneyMarket is Exponential, SafeToken {
       * @param originationFeeMantissa rational collateral ratio, scaled by 1e18. The de-scaled value must be >= 1.1
       * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
       */
-    function _setOriginationFee(uint originationFeeMantissa) public returns (uint) {
+    function _setTransactionFee(uint transactionFeeExp) public returns (uint) {
         // Check caller = admin
         if (msg.sender != admin) {
             return fail(Error.UNAUTHORIZED, FailureInfo.SET_ORIGINATION_FEE_OWNER_CHECK);
         }
 
         // Save current value so we can emit it in log.
-        Exp memory oldOriginationFee = originationFee;
+        Exp memory oldTransactionFee = transactionFee;
 
-        originationFee = Exp({mantissa: originationFeeMantissa});
+        transactionFee = Exp({mantissa: transactionFeeExp});
 
-        emit NewOriginationFee(oldOriginationFee.mantissa, originationFeeMantissa);
+        emit NewTransactionFee(old TransactionFee.mantissa, transactinoFeeExp);
 
         return uint(Error.NO_ERROR);
     }
@@ -804,13 +856,19 @@ contract MoneyMarket is Exponential, SafeToken {
     }
 
     /**
+      * @dev emitted when admin withdraws equity
+      * Note that `equityAvailableBefore` indicates equity before `amount` was removed.
+      */
+    event EquityWithdrawnFromSupply(address asset, uint equityAvailableBefore, uint amount, address owner);
+
+    /**
       * @notice withdraws `amount` of `asset` from equity for asset, as long as `amount` <= equity. Equity= cash - (supply + borrows)
       * @dev withdraws `amount` of `asset` from equity  for asset, enforcing amount <= cash - (supply + borrows)
       * @param asset asset whose equity should be withdrawn
       * @param amount amount of equity to withdraw; must not exceed equity available
       * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
       */
-    function _withdrawEquity(address asset, uint amount) public returns (uint) {
+    function _withdrawEquityFromSupply(address asset, uint amount) public returns (uint) {
         // Check caller = admin
         if (msg.sender != admin) {
             return fail(Error.UNAUTHORIZED, FailureInfo.EQUITY_WITHDRAWAL_MODEL_OWNER_CHECK);
@@ -839,10 +897,44 @@ contract MoneyMarket is Exponential, SafeToken {
         }
 
         //event EquityWithdrawn(address asset, uint equityAvailableBefore, uint amount, address owner)
-        emit EquityWithdrawn(asset, equity, amount, admin);
+        emit EquityWithdrawnFromSupply(asset, equity, amount, admin);
 
         return uint(Error.NO_ERROR); // success
     }
+
+    /**
+      * @dev emitted when admin withdraws equity
+      * Note that `equityAvailableBefore` indicates equity before `amount` was removed.
+      */
+    event EquityWithdrawnFromReserve(address asset, uint equityAvailableBefore, uint amount, address owner);
+
+    function _withdrawEquityFromReserve(address reserveAsset, uint amount) public returns (uint) {
+        if (msg.sender != admin) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.EQUITY_WITHDRAWAL_MODEL_OWNER_CHECK);
+        }
+
+        Market storage market = markets[reserveAsset];
+
+        uint cash = markets.totalReserve;
+
+        if (cash > equity) {
+            return fail(Error.EQUITY_INSUFFICIENT_BALANCE, FailureInfo.EQUITY_WITHDRAWAL_AMOUNT_VALIDATION);
+        }
+
+        Error err2 = doTransferOut(reserveAsset, admin, amount);
+        if (err2 != Error.NO_ERROR) {
+            // This is safe since it's our first interaction and it didn't do anything if it failed
+            return fail(err2, FailureInfo.EQUITY_WITHDRAWAL_TRANSFER_OUT_FAILED);
+        }
+
+        //event EquityWithdrawn(address asset, uint equityAvailableBefore, uint amount, address owner)
+        emit EquityWithdrawnFromSupply(asset, cash, amount, admin);
+
+        return uint(Error.NO_ERROR); // success
+
+    }
+
+
 
     /**
       * The `SupplyLocalVars` struct is used internally in the `supply` function.
@@ -874,7 +966,7 @@ contract MoneyMarket is Exponential, SafeToken {
       * @param amount The amount to supply
       * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
       */
-    function supply(address asset, uint amount) public returns (uint) {
+    function supplyToLendingPool(address asset, uint amount) public returns (uint) {
         if (paused) {
             return fail(Error.CONTRACT_PAUSED, FailureInfo.SUPPLY_CONTRACT_PAUSED);
         }
@@ -971,6 +1063,18 @@ contract MoneyMarket is Exponential, SafeToken {
         emit SupplyReceived(msg.sender, asset, amount, localResults.startingBalance, localResults.userSupplyUpdated);
 
         return uint(Error.NO_ERROR); // success
+    }
+
+
+    function supplyToReservePool(address asset, uint amount){
+        if (paused) {
+            return fail(Error.CONTRACT_PAUSED, FailureInfo.SUPPLY_CONTRACT_PAUSED);
+        }
+
+        Market storage market = markets[asset];
+        Balance storage balance = reserveBalances[msg.sender][asset];
+
+
     }
 
     struct WithdrawLocalVars {
